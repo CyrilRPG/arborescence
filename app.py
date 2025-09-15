@@ -1,16 +1,13 @@
 import io
 import json
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import streamlit as st
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.enums import TA_LEFT, TA_CENTER
-from reportlab.lib import colors
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, PageBreak, KeepTogether, Flowable, Image
-)
+from reportlab.lib.enums import TA_CENTER
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Flowable, Image
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 
@@ -19,7 +16,7 @@ from reportlab.lib.units import mm
 st.set_page_config(page_title="Hermione — Arborescence PDF", page_icon="📚", layout="centered")
 
 st.title("📚 Hermione — Arborescence → PDF")
-st.caption("Uploader un ou plusieurs JSON (~30 000 lignes ok). Générer un PDF propre et paginé (1 fac par page).")
+st.caption("Uploader un ou plusieurs JSON (~30 000 lignes ok). Générer un PDF propre et paginé (1 fac par page au minimum).")
 
 with st.sidebar:
     st.header("🎨 Charte graphique")
@@ -34,12 +31,6 @@ st.subheader("1) Uploade tes fichiers JSON")
 files = st.file_uploader("Fichiers JSON", type=["json"], accept_multiple_files=True)
 
 # ---------------------- Parsing & tree helpers ----------------------- #
-
-def safe_get(lst: list, key: str, default=None):
-    try:
-        return lst.get(key, default)
-    except Exception:
-        return default
 
 def ensure_list(x: Any) -> List[Any]:
     if x is None:
@@ -61,38 +52,27 @@ def load_all_trees(files) -> List[Dict[str, Any]]:
     return trees
 
 def node_title(node: Dict[str, Any]) -> str:
-    # title prioritaire, sinon data.name
-    t = node.get("title") or node.get("data", {}).get("name")
-    if not t:
-        t = f"Élément {node.get('id','?')}"
+    t = node.get("title") or node.get("data", {}).get("name") or f"Élément {node.get('id','?')}"
     return str(t).strip()
 
 def collect_courses_by_matiere(root_node: Dict[str, Any]) -> List[Tuple[str, List[str]]]:
     """
-    À partir d'une fac (racine), renvoie une liste de tuples:
-      [(matiere_label, [cours1, cours2, ...]), ...]
-    On considère comme "matière" chaque enfant direct de la racine (ue/semestre/etc.).
-    Les "cours" sont tous les descendants avec type == 'cours'.
+    À partir d'une fac (racine), renvoie [(matiere_label, [cours...]), ...]
+    Les 'cours' = tous les descendants avec type == 'cours'.
     """
     out: List[Tuple[str, List[str]]] = []
     for child in ensure_list(root_node.get("children")):
         matiere_label = node_title(child)
         cours_list: List[str] = []
 
-        # DFS pour collecter tous les 'cours'
         stack = [child]
         while stack:
             n = stack.pop()
-            tp = n.get("type")
-            if tp == "cours":
+            if n.get("type") == "cours":
                 cours_list.append(node_title(n))
             else:
-                kids = ensure_list(n.get("children"))
-                if kids:
-                    stack.extend(kids)
-
+                stack.extend(ensure_list(n.get("children")))
         out.append((matiere_label, sorted(set(cours_list), key=lambda s: s.lower())))
-    # Garder l'ordre d'origine des matières mais c'est triable si besoin
     return out
 
 # --------------------------- PDF Builder ----------------------------- #
@@ -107,30 +87,31 @@ class HeaderBand(Flowable):
 
     def draw(self):
         c: canvas.Canvas = self.canv
-        width = c._pagesize[0]
-        # Bandeau couleur
+        width, height = c._pagesize
         c.saveState()
         c.setFillColorRGB(*self.primary)
-        c.rect(0, c._pagesize[1] - self.h, width, self.h, stroke=0, fill=1)
-        # Logo/bandeau optionnel
+        c.rect(0, height - self.h, width, self.h, stroke=0, fill=1)
         if self.brand_path:
             try:
-                # garder une marge
                 margin = 8 * mm
                 max_h = self.h - 6 * mm
                 img = Image(self.brand_path, width=width - 2*margin, height=max_h)
                 iw, ih = img.wrap(width - 2*margin, max_h)
-                img.drawOn(c, (width - iw) / 2, c._pagesize[1] - self.h + (self.h - ih) / 2)
+                img.drawOn(c, (width - iw) / 2, height - self.h + (self.h - ih) / 2)
             except Exception:
                 pass
         c.restoreState()
 
 def hex_to_rgb01(hex_color: str) -> Tuple[float, float, float]:
     hex_color = hex_color.lstrip("#")
-    r = int(hex_color[0:2], 16) / 255.0
-    g = int(hex_color[2:4], 16) / 255.0
-    b = int(hex_color[4:6], 16) / 255.0
-    return (r, g, b)
+    return (int(hex_color[0:2], 16)/255.0,
+            int(hex_color[2:4], 16)/255.0,
+            int(hex_color[4:6], 16)/255.0)
+
+def add_style_if_absent(styles, style: ParagraphStyle):
+    # évite KeyError si le nom existe déjà
+    if style.name not in styles.byName:
+        styles.add(style)
 
 def build_pdf(trees: List[Dict[str, Any]],
               primary_hex: str,
@@ -146,11 +127,10 @@ def build_pdf(trees: List[Dict[str, Any]],
     )
 
     primary_rgb01 = hex_to_rgb01(primary_hex)
-    text_rgb01 = hex_to_rgb01(text_hex)
 
     styles = getSampleStyleSheet()
 
-    styles.add(ParagraphStyle(
+    add_style_if_absent(styles, ParagraphStyle(
         name="CoverTitle",
         fontName="Helvetica-Bold",
         fontSize=28,
@@ -159,7 +139,7 @@ def build_pdf(trees: List[Dict[str, Any]],
         leading=32,
     ))
 
-    styles.add(ParagraphStyle(
+    add_style_if_absent(styles, ParagraphStyle(
         name="FacTitle",
         fontName="Helvetica-Bold",
         fontSize=22,
@@ -168,7 +148,7 @@ def build_pdf(trees: List[Dict[str, Any]],
         spaceAfter=6,
     ))
 
-    styles.add(ParagraphStyle(
+    add_style_if_absent(styles, ParagraphStyle(
         name="SectionTitle",
         fontName="Helvetica-Bold",
         fontSize=15,
@@ -178,14 +158,14 @@ def build_pdf(trees: List[Dict[str, Any]],
         spaceAfter=2,
     ))
 
-    styles.add(ParagraphStyle(
-        name="Bullet",
+    # ⚠️ nouveau nom pour éviter la collision avec le style "Bullet" de base
+    add_style_if_absent(styles, ParagraphStyle(
+        name="ListItem",
         fontName="Helvetica",
         fontSize=11.5,
         textColor=text_hex,
         leading=15,
         leftIndent=10,
-        bulletIndent=0,
     ))
 
     story: List[Any] = []
@@ -202,9 +182,9 @@ def build_pdf(trees: List[Dict[str, Any]],
         story.append(Paragraph(f"Généré le {today}", ParagraphStyle(name="CoverMeta", alignment=TA_CENTER)))
         story.append(PageBreak())
 
-    # -- Contenu : 1 fac par page
+    # -- Contenu : 1 fac par page minimum (une fac peut s'étendre sur plusieurs pages)
     for idx, fac in enumerate(trees):
-        # Entête graphique à chaque page
+        # entête graphique en haut de la première page de la fac
         band = HeaderBand(height_mm=16, primary_rgb=primary_rgb01,
                           brand_path=io.BytesIO(brand_img_bytes) if brand_img_bytes else None)
         story.append(band)
@@ -213,26 +193,21 @@ def build_pdf(trees: List[Dict[str, Any]],
         fac_name = node_title(fac)
         story.append(Paragraph(fac_name, styles["FacTitle"]))
 
-        # Matières + cours
-        blocs: List[Any] = []
         matieres = collect_courses_by_matiere(fac)
 
-        # Si pas d'enfants, on crée un bloc vide explicatif
         if not matieres:
-            blocs.append(Paragraph("Aucune matière/cours trouvé(e) pour cette faculté.", styles["Bullet"]))
+            story.append(Paragraph("• Aucune matière/cours trouvé(e) pour cette faculté.", styles["ListItem"]))
         else:
             for mat_label, cours in matieres:
-                blocs.append(Paragraph(mat_label, styles["SectionTitle"]))
+                story.append(Paragraph(mat_label, styles["SectionTitle"]))
                 if cours:
                     for ctitle in cours:
-                        blocs.append(Paragraph(f"• {ctitle}", styles["Bullet"]))
+                        story.append(Paragraph(f"• {ctitle}", styles["ListItem"]))
                 else:
-                    blocs.append(Paragraph("• (aucun cours listé)", styles["Bullet"]))
-                blocs.append(Spacer(1, 3 * mm))
+                    story.append(Paragraph("• (aucun cours listé)", styles["ListItem"]))
+                story.append(Spacer(1, 3 * mm))
 
-        story.append(KeepTogether(blocs))
-
-        # Saut de page entre facs, mais pas après la dernière si souhaité
+        # assure qu'aucune autre fac ne commencera sur la même page
         if idx < len(trees) - 1:
             story.append(PageBreak())
 
@@ -244,7 +219,7 @@ def build_pdf(trees: List[Dict[str, Any]],
 
 if files:
     trees = load_all_trees(files)
-    nb_fac = sum(1 for n in trees)
+    nb_fac = len(trees)
     st.success(f"✅ {nb_fac} faculté(s) détectée(s).")
     with st.expander("Aperçu (noms des facultés)"):
         for i, fac in enumerate(trees, start=1):
